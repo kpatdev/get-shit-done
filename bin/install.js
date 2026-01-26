@@ -616,7 +616,7 @@ function uninstall(isGlobal, runtime = 'claude') {
   // 4. Remove GSD hooks
   const hooksDir = path.join(targetDir, 'hooks');
   if (fs.existsSync(hooksDir)) {
-    const gsdHooks = ['gsd-statusline.js', 'gsd-check-update.js', 'gsd-check-update.sh'];
+    const gsdHooks = ['gsd-statusline.js', 'gsd-check-update.js', 'gsd-check-update.sh', 'gsd-activity.sh'];
     let hookCount = 0;
     for (const hook of gsdHooks) {
       const hookPath = path.join(hooksDir, hook);
@@ -660,16 +660,33 @@ function uninstall(isGlobal, runtime = 'claude') {
       });
       if (settings.hooks.SessionStart.length < before) {
         settingsModified = true;
-        console.log(`  ${green}✓${reset} Removed GSD hooks from settings`);
+        console.log(`  ${green}✓${reset} Removed GSD SessionStart hooks from settings`);
       }
       // Clean up empty array
       if (settings.hooks.SessionStart.length === 0) {
         delete settings.hooks.SessionStart;
       }
-      // Clean up empty hooks object
-      if (Object.keys(settings.hooks).length === 0) {
-        delete settings.hooks;
+    }
+
+    // Remove GSD activity hook from PostToolUse
+    if (settings.hooks && settings.hooks.PostToolUse) {
+      const before = settings.hooks.PostToolUse.length;
+      settings.hooks.PostToolUse = settings.hooks.PostToolUse.filter(entry => {
+        return !(entry.command && entry.command.includes('gsd-activity'));
+      });
+      if (settings.hooks.PostToolUse.length < before) {
+        settingsModified = true;
+        console.log(`  ${green}✓${reset} Removed GSD PostToolUse hooks from settings`);
       }
+      // Clean up empty array
+      if (settings.hooks.PostToolUse.length === 0) {
+        delete settings.hooks.PostToolUse;
+      }
+    }
+
+    // Clean up empty hooks object
+    if (settings.hooks && Object.keys(settings.hooks).length === 0) {
+      delete settings.hooks;
     }
 
     if (settingsModified) {
@@ -981,6 +998,22 @@ function install(isGlobal, runtime = 'claude') {
     }
   }
 
+  // Copy GSD activity hook for autopilot real-time display
+  const activityHookSrc = path.join(src, 'hooks', 'gsd-activity.sh');
+  if (fs.existsSync(activityHookSrc)) {
+    const hooksDest = path.join(targetDir, 'hooks');
+    fs.mkdirSync(hooksDest, { recursive: true });
+    const activityHookDest = path.join(hooksDest, 'gsd-activity.sh');
+    fs.copyFileSync(activityHookSrc, activityHookDest);
+    // Make executable on Unix systems
+    try {
+      fs.chmodSync(activityHookDest, 0o755);
+    } catch (e) {
+      // Windows doesn't support chmod
+    }
+    console.log(`  ${green}✓${reset} Installed gsd-activity.sh hook`);
+  }
+
   // If critical components failed, exit with error
   if (failures.length > 0) {
     console.error(`\n  ${yellow}Installation incomplete!${reset} Failed: ${failures.join(', ')}`);
@@ -1022,6 +1055,31 @@ function install(isGlobal, runtime = 'claude') {
         ]
       });
       console.log(`  ${green}✓${reset} Configured update check hook`);
+    }
+
+    // Configure PostToolUse hook for autopilot activity display
+    if (!settings.hooks.PostToolUse) {
+      settings.hooks.PostToolUse = [];
+    }
+
+    // Build activity hook command path
+    const activityHookCommand = isGlobal
+      ? `bash "${targetDir.replace(/\\/g, '/')}/hooks/gsd-activity.sh"`
+      : `bash ${dirName}/hooks/gsd-activity.sh`;
+
+    // Check if GSD activity hook already exists
+    const hasGsdActivityHook = settings.hooks.PostToolUse.some(entry =>
+      entry.command && entry.command.includes('gsd-activity')
+    );
+
+    if (!hasGsdActivityHook) {
+      settings.hooks.PostToolUse.push({
+        matcher: {
+          tool_name: ['Task', 'Write', 'Edit', 'Read', 'Bash', 'TodoWrite']
+        },
+        command: activityHookCommand
+      });
+      console.log(`  ${green}✓${reset} Configured autopilot activity hook`);
     }
   }
 

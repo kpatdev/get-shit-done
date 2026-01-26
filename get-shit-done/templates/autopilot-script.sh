@@ -82,6 +82,132 @@ safe_calc() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Terminal UI Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Colors (auto-disabled if not a terminal)
+if [ -t 1 ]; then
+  C_RESET='\033[0m'
+  C_BOLD='\033[1m'
+  C_DIM='\033[2m'
+  C_RED='\033[31m'
+  C_GREEN='\033[32m'
+  C_YELLOW='\033[33m'
+  C_BLUE='\033[34m'
+  C_MAGENTA='\033[35m'
+  C_CYAN='\033[36m'
+  C_WHITE='\033[37m'
+  # Cursor control
+  CURSOR_UP='\033[1A'
+  CURSOR_CLEAR='\033[K'
+  CURSOR_HIDE='\033[?25l'
+  CURSOR_SHOW='\033[?25h'
+else
+  C_RESET='' C_BOLD='' C_DIM='' C_RED='' C_GREEN='' C_YELLOW=''
+  C_BLUE='' C_MAGENTA='' C_CYAN='' C_WHITE=''
+  CURSOR_UP='' CURSOR_CLEAR='' CURSOR_HIDE='' CURSOR_SHOW=''
+fi
+
+# Spinner frames (works in any terminal)
+SPINNER_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+SPINNER_PID=""
+
+# Start spinner with message
+start_spinner() {
+  local msg="$1"
+
+  # Don't start if not a terminal or already running
+  [ -t 1 ] || return 0
+  [ -n "$SPINNER_PID" ] && return 0
+
+  (
+    local i=0
+    while true; do
+      printf "\r${C_CYAN}${SPINNER_FRAMES[$i]}${C_RESET} ${C_DIM}%s${C_RESET}${CURSOR_CLEAR}" "$msg"
+      i=$(( (i + 1) % ${#SPINNER_FRAMES[@]} ))
+      sleep 0.1
+    done
+  ) &
+  SPINNER_PID=$!
+  disown $SPINNER_PID 2>/dev/null
+}
+
+# Stop spinner and show result
+stop_spinner() {
+  local result="${1:-done}"  # done, error, skip
+  local msg="${2:-}"
+
+  if [ -n "$SPINNER_PID" ]; then
+    kill $SPINNER_PID 2>/dev/null
+    wait $SPINNER_PID 2>/dev/null
+    SPINNER_PID=""
+  fi
+
+  # Clear spinner line
+  printf "\r${CURSOR_CLEAR}"
+
+  # Show result
+  case "$result" in
+    done)   printf "${C_GREEN}✓${C_RESET} %s\n" "$msg" ;;
+    error)  printf "${C_RED}✗${C_RESET} %s\n" "$msg" ;;
+    skip)   printf "${C_YELLOW}○${C_RESET} %s\n" "$msg" ;;
+    *)      printf "  %s\n" "$msg" ;;
+  esac
+}
+
+# Progress bar
+progress_bar() {
+  local current=$1
+  local total=$2
+  local width=${3:-30}
+  local label="${4:-}"
+
+  local percent=$((current * 100 / total))
+  local filled=$((current * width / total))
+  local empty=$((width - filled))
+
+  local bar=""
+  for ((i=0; i<filled; i++)); do bar+="█"; done
+  for ((i=0; i<empty; i++)); do bar+="░"; done
+
+  printf "\r${C_BOLD}%s${C_RESET} [${C_CYAN}%s${C_RESET}] %3d%% " "$label" "$bar" "$percent"
+}
+
+# Styled section header
+section_header() {
+  local title="$1"
+  local subtitle="${2:-}"
+
+  echo ""
+  printf "${C_BOLD}${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}\n"
+  printf "${C_BOLD}${C_WHITE} GSD ► %s${C_RESET}\n" "$title"
+  if [ -n "$subtitle" ]; then
+    printf "${C_DIM} %s${C_RESET}\n" "$subtitle"
+  fi
+  printf "${C_BOLD}${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}\n"
+  echo ""
+}
+
+# Status line (updates in place)
+status_line() {
+  local phase="$1"
+  local stage="$2"
+  local detail="${3:-}"
+
+  if [ -t 1 ]; then
+    printf "\r${CURSOR_CLEAR}${C_DIM}Phase %s${C_RESET} │ ${C_CYAN}%s${C_RESET}" "$phase" "$stage"
+    [ -n "$detail" ] && printf " ${C_DIM}%s${C_RESET}" "$detail"
+  fi
+}
+
+# Cleanup on exit (ensure cursor visible)
+cleanup_ui() {
+  [ -n "$SPINNER_PID" ] && kill $SPINNER_PID 2>/dev/null
+  printf "${CURSOR_SHOW}" 2>/dev/null
+}
+trap cleanup_ui EXIT
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Logging & Notifications
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -89,15 +215,28 @@ log() {
   local level="$1"
   local message="$2"
   local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-  echo "[$timestamp] [$level] $message" | tee -a "$LOG_DIR/autopilot.log"
+
+  # Always write to log file (no colors)
+  echo "[$timestamp] [$level] $message" >> "$LOG_DIR/autopilot.log"
+
+  # Terminal output with colors
+  local color=""
+  local icon=""
+  case "$level" in
+    INFO)    color="$C_BLUE";   icon="ℹ" ;;
+    SUCCESS) color="$C_GREEN";  icon="✓" ;;
+    WARN)    color="$C_YELLOW"; icon="⚠" ;;
+    ERROR)   color="$C_RED";    icon="✗" ;;
+    FATAL)   color="$C_RED";    icon="☠" ;;
+    COST)    color="$C_MAGENTA"; icon="$" ;;
+    *)       color="$C_DIM";    icon="•" ;;
+  esac
+
+  printf "${color}${icon}${C_RESET} ${C_DIM}%s${C_RESET} %s\n" "[$timestamp]" "$message"
 }
 
 banner() {
-  echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo " GSD ► $1"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo ""
+  section_header "$1"
 }
 
 notify() {
@@ -271,9 +410,9 @@ process_approved_checkpoints() {
     # Spawn continuation agent
     local continuation_log="$LOG_DIR/continuation-phase${phase}-plan${plan}-$(date +%Y%m%d-%H%M%S).log"
 
-    echo ""
-    echo "◆ Continuing Phase $phase, Plan $plan (checkpoint approved)..."
-    echo ""
+    printf "\n${C_CYAN}◆${C_RESET} Continuing Phase %s, Plan %s ${C_DIM}(checkpoint approved)${C_RESET}\n\n" "$phase" "$plan"
+
+    start_spinner "Resuming from checkpoint..."
 
     # Pass the checkpoint context and user response to continuation
     echo "/gsd:execute-plan $phase $plan --continue --checkpoint-response \"$user_response\"" | claude -p \
@@ -281,10 +420,10 @@ process_approved_checkpoints() {
         2>&1 | tee -a "$continuation_log"
 
     if [ ${PIPESTATUS[1]} -ne 0 ]; then
-      log "ERROR" "Continuation failed for Phase $phase, Plan $plan"
+      stop_spinner "error" "Continuation failed"
       # Don't move to processed - will retry on next run
     else
-      log "SUCCESS" "Continuation complete for Phase $phase, Plan $plan"
+      stop_spinner "done" "Checkpoint complete"
       mv "$approval" "$CHECKPOINT_DIR/processed/"
       track_cost "$continuation_log" "$phase"
     fi
@@ -311,58 +450,80 @@ execute_phase() {
 
   # Skip already-completed phases (idempotency on resume)
   if is_phase_complete "$phase"; then
-    log "INFO" "Phase $phase already complete in ROADMAP.md, skipping"
+    stop_spinner "skip" "Phase $phase already complete"
     return 0
   fi
 
-  banner "PHASE $phase"
+  # Get phase name from roadmap
+  local phase_name=$(grep -E "Phase $phase:" .planning/ROADMAP.md 2>/dev/null | sed 's/.*Phase [0-9]*: //' | head -1)
+  [ -z "$phase_name" ] && phase_name="Unknown"
+
+  section_header "PHASE $phase" "$phase_name"
 
   while [ $attempt -le $MAX_RETRIES ]; do
-    log "INFO" "Phase $phase - Attempt $attempt of $MAX_RETRIES"
+    [ $attempt -gt 1 ] && printf "${C_YELLOW}Retry %d/%d${C_RESET}\n\n" "$attempt" "$MAX_RETRIES"
 
     # Check if phase needs planning
     local phase_dir=$(ls -d .planning/phases/$(printf "%02d" "$phase" 2>/dev/null || echo "$phase")-* 2>/dev/null | head -1)
 
     if [ -z "$phase_dir" ] || [ $(ls "$phase_dir"/*-PLAN.md 2>/dev/null | wc -l) -eq 0 ]; then
-      log "INFO" "Planning phase $phase..."
+      # ── PLANNING ──
+      printf "${C_BOLD}Planning${C_RESET}\n"
       echo ""
-      echo "◆ Planning phase $phase..."
-      echo ""
+
+      start_spinner "Researching domain & patterns..."
 
       echo "/gsd:plan-phase $phase" | claude -p \
           --allowedTools "Read,Write,Edit,Glob,Grep,Bash,Task,TodoWrite,AskUserQuestion" \
           2>&1 | tee -a "$phase_log"
-      if [ ${PIPESTATUS[1]} -ne 0 ]; then
-        log "ERROR" "Planning failed for phase $phase"
+      local exit_code=${PIPESTATUS[1]}
+
+      if [ $exit_code -ne 0 ]; then
+        stop_spinner "error" "Planning failed"
         ((attempt++))
         sleep 5
         continue
       fi
 
-      # Re-check phase_dir after planning
+      # Count plans created
       phase_dir=$(ls -d .planning/phases/$(printf "%02d" "$phase" 2>/dev/null || echo "$phase")-* 2>/dev/null | head -1)
+      local plan_count=$(ls "$phase_dir"/*-PLAN.md 2>/dev/null | wc -l | tr -d ' ')
+
+      stop_spinner "done" "Created $plan_count plan(s)"
+      echo ""
+    else
+      local plan_count=$(ls "$phase_dir"/*-PLAN.md 2>/dev/null | wc -l | tr -d ' ')
+      printf "${C_DIM}Using existing plans: %s${C_RESET}\n\n" "$plan_count"
     fi
 
-    # Execute phase
-    log "INFO" "Executing phase $phase..."
+    # ── EXECUTION ──
+    printf "${C_BOLD}Executing${C_RESET}\n"
     echo ""
-    echo "◆ Executing phase $phase..."
-    echo ""
+
+    start_spinner "Building features..."
 
     echo "/gsd:execute-phase $phase" | claude -p \
         --allowedTools "Read,Write,Edit,Glob,Grep,Bash,Task,TodoWrite,AskUserQuestion" \
         2>&1 | tee -a "$phase_log"
-    if [ ${PIPESTATUS[1]} -ne 0 ]; then
-      log "ERROR" "Execution failed for phase $phase"
+    local exit_code=${PIPESTATUS[1]}
+
+    if [ $exit_code -ne 0 ]; then
+      stop_spinner "error" "Execution failed"
       ((attempt++))
       sleep 5
       continue
     fi
 
+    stop_spinner "done" "Execution complete"
+    echo ""
+
     # Track cost
     track_cost "$phase_log" "$phase"
 
-    # Check verification status
+    # ── VERIFICATION ──
+    printf "${C_BOLD}Verification${C_RESET}\n"
+    echo ""
+
     local verification_file=$(ls "$phase_dir"/*-VERIFICATION.md 2>/dev/null | head -1)
     local status="unknown"
 
@@ -370,85 +531,82 @@ execute_phase() {
       status=$(grep "^status:" "$verification_file" | head -1 | cut -d: -f2 | tr -d ' ')
     fi
 
-    log "INFO" "Phase $phase verification status: $status"
-
     case "$status" in
       "passed")
-        log "SUCCESS" "Phase $phase VERIFIED"
+        printf "${C_GREEN}✓${C_RESET} Phase verified\n"
         notify "Phase $phase complete" "success"
         return 0
         ;;
 
       "gaps_found")
-        log "INFO" "Phase $phase has gaps, planning closure..."
+        printf "${C_YELLOW}⚠${C_RESET} Gaps found, attempting closure...\n"
         echo ""
-        echo "◆ Planning gap closure for phase $phase..."
-        echo ""
+
+        start_spinner "Planning gap closure..."
 
         echo "/gsd:plan-phase $phase --gaps" | claude -p \
             --allowedTools "Read,Write,Edit,Glob,Grep,Bash,Task,TodoWrite,AskUserQuestion" \
             2>&1 | tee -a "$phase_log"
+
         if [ ${PIPESTATUS[1]} -ne 0 ]; then
-          log "ERROR" "Gap planning failed for phase $phase"
+          stop_spinner "error" "Gap planning failed"
           ((attempt++))
           continue
         fi
 
-        echo ""
-        echo "◆ Executing gap closure for phase $phase..."
-        echo ""
+        stop_spinner "done" "Gap closure planned"
+
+        start_spinner "Executing gap closure..."
 
         echo "/gsd:execute-phase $phase --gaps-only" | claude -p \
             --allowedTools "Read,Write,Edit,Glob,Grep,Bash,Task,TodoWrite,AskUserQuestion" \
             2>&1 | tee -a "$phase_log"
+
         if [ ${PIPESTATUS[1]} -ne 0 ]; then
-          log "ERROR" "Gap execution failed for phase $phase"
+          stop_spinner "error" "Gap execution failed"
           ((attempt++))
           continue
         fi
 
-        # Track additional cost
         track_cost "$phase_log" "$phase"
 
         # Re-check verification
         status=$(grep "^status:" "$verification_file" 2>/dev/null | tail -1 | cut -d: -f2 | tr -d ' ')
 
         if [ "$status" = "passed" ]; then
-          log "SUCCESS" "Phase $phase VERIFIED after gap closure"
+          stop_spinner "done" "Gaps closed, verified"
           notify "Phase $phase complete (after gap closure)" "success"
           return 0
         else
-          log "WARN" "Phase $phase still has gaps after closure attempt"
+          stop_spinner "error" "Gaps remain"
           ((attempt++))
           continue
         fi
         ;;
 
       "human_needed")
-        log "INFO" "Phase $phase needs human verification"
+        printf "${C_CYAN}◆${C_RESET} Human verification needed\n"
 
         if [ "$CHECKPOINT_MODE" = "queue" ]; then
-          # Queue for later and continue
           queue_checkpoint "$phase" "verification" "{\"type\": \"human_verification\", \"phase\": \"$phase\"}"
-          log "INFO" "Human verification queued, continuing..."
+          printf "${C_DIM}  Queued for later review${C_RESET}\n"
           return 0
         else
-          # Skip mode - just continue
-          log "WARN" "Skipping human verification (checkpoint_mode: skip)"
+          printf "${C_DIM}  Skipped (checkpoint_mode: skip)${C_RESET}\n"
           return 0
         fi
         ;;
 
       *)
-        # Unknown or no verification - assume success if execution completed
-        log "WARN" "Unknown verification status: $status (treating as success)"
+        printf "${C_DIM}○${C_RESET} No verification required\n"
         return 0
         ;;
     esac
   done
 
   # All retries exhausted
-  log "FATAL" "Phase $phase failed after $MAX_RETRIES attempts"
+  echo ""
+  printf "${C_RED}${C_BOLD}✗ Phase $phase failed after $MAX_RETRIES attempts${C_RESET}\n"
   notify "Phase $phase FAILED after $MAX_RETRIES attempts" "error"
   return 1
 }
@@ -458,13 +616,41 @@ execute_phase() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 main() {
-  banner "AUTOPILOT STARTED"
+  local total_phases=${#PHASES[@]}
+  local completed_phases=0
+  local start_time=$(date +%s)
 
-  log "INFO" "Project: $PROJECT_NAME"
-  log "INFO" "Phases: ${PHASES[*]}"
-  log "INFO" "Checkpoint mode: $CHECKPOINT_MODE"
-  log "INFO" "Max retries: $MAX_RETRIES"
-  log "INFO" "Budget limit: \$$BUDGET_LIMIT"
+  # ── STARTUP BANNER ──
+  clear 2>/dev/null || true
+  echo ""
+  printf "${C_BOLD}${C_CYAN}"
+  cat << 'EOF'
+   ██████╗ ███████╗██████╗
+  ██╔════╝ ██╔════╝██╔══██╗
+  ██║  ███╗███████╗██║  ██║
+  ██║   ██║╚════██║██║  ██║
+  ╚██████╔╝███████║██████╔╝
+   ╚═════╝ ╚══════╝╚═════╝
+EOF
+  printf "${C_RESET}"
+  echo ""
+  printf "${C_BOLD}${C_WHITE}  AUTOPILOT${C_RESET}\n"
+  printf "${C_DIM}  %s${C_RESET}\n" "$PROJECT_NAME"
+  echo ""
+  printf "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}\n"
+  echo ""
+
+  # ── CONFIG SUMMARY ──
+  printf "${C_DIM}Phases:${C_RESET}     %s\n" "${PHASES[*]}"
+  printf "${C_DIM}Retries:${C_RESET}    %s per phase\n" "$MAX_RETRIES"
+  printf "${C_DIM}Budget:${C_RESET}     \$%s\n" "$BUDGET_LIMIT"
+  printf "${C_DIM}Checkpoints:${C_RESET} %s\n" "$CHECKPOINT_MODE"
+  echo ""
+
+  # Overall progress bar
+  progress_bar 0 "$total_phases" 40 "Progress"
+  echo ""
+  echo ""
 
   notify "Autopilot started for $PROJECT_NAME" "info"
 
@@ -482,60 +668,81 @@ main() {
 
     if ! execute_phase "$phase"; then
       update_autopilot_state "failed" "$phase" "$remaining_str" "phase_$phase_failed"
-      log "FATAL" "Autopilot stopped at phase $phase"
+      echo ""
+      printf "${C_RED}${C_BOLD}Autopilot stopped at phase $phase${C_RESET}\n"
       notify "Autopilot STOPPED at phase $phase" "error"
       exit 1
     fi
 
-    log "SUCCESS" "Phase $phase complete"
+    # Update progress
+    ((completed_phases++))
     echo ""
-    echo "✓ Phase $phase complete"
+    progress_bar "$completed_phases" "$total_phases" 40 "Progress"
+    echo ""
+
+    # Time estimate
+    local elapsed=$(($(date +%s) - start_time))
+    local avg_per_phase=$((elapsed / completed_phases))
+    local remaining=$((total_phases - completed_phases))
+    local eta=$((remaining * avg_per_phase))
+
+    if [ $remaining -gt 0 ]; then
+      local eta_min=$((eta / 60))
+      local eta_sec=$((eta % 60))
+      printf "${C_DIM}~%dm %ds remaining${C_RESET}\n" "$eta_min" "$eta_sec"
+    fi
     echo ""
   done
 
   # Process any final approved checkpoints
   process_approved_checkpoints
 
-  # All phases complete
-  banner "MILESTONE COMPLETE"
+  # ── COMPLETION ──
+  local total_time=$(($(date +%s) - start_time))
+  local total_min=$((total_time / 60))
+  local total_sec=$((total_time % 60))
+
+  echo ""
+  printf "${C_BOLD}${C_GREEN}"
+  cat << 'EOF'
+  ╔═══════════════════════════════════════════════════╗
+  ║              MILESTONE COMPLETE                   ║
+  ╚═══════════════════════════════════════════════════╝
+EOF
+  printf "${C_RESET}"
+  echo ""
 
   update_autopilot_state "completed" "all" "none"
 
-  log "SUCCESS" "All ${#PHASES[@]} phases completed"
-  log "INFO" "Total tokens: $TOTAL_TOKENS"
-  log "INFO" "Total cost: \$$TOTAL_COST"
+  # Stats
+  printf "${C_WHITE}Phases:${C_RESET}    %d completed\n" "$total_phases"
+  printf "${C_WHITE}Time:${C_RESET}      %dm %ds\n" "$total_min" "$total_sec"
+  printf "${C_WHITE}Tokens:${C_RESET}    %s\n" "$TOTAL_TOKENS"
+  printf "${C_WHITE}Cost:${C_RESET}      \$%s\n" "$TOTAL_COST"
+  echo ""
 
   # Complete milestone
-  echo ""
-  echo "◆ Completing milestone..."
-  echo ""
+  start_spinner "Finalizing milestone..."
 
   echo "/gsd:complete-milestone" | claude -p \
     --allowedTools "Read,Write,Edit,Glob,Grep,Bash,AskUserQuestion" \
     2>&1 | tee -a "$LOG_DIR/milestone-complete.log"
-  # Don't fail on milestone completion - phases are done
+
+  stop_spinner "done" "Milestone finalized"
 
   notify "Milestone COMPLETE! ${#PHASES[@]} phases, \$$TOTAL_COST" "success"
-
-  # Final summary
-  echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo " AUTOPILOT SUMMARY"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo ""
-  echo "Phases completed: ${#PHASES[@]}"
-  echo "Total tokens: $TOTAL_TOKENS"
-  echo "Total cost: \$$TOTAL_COST"
-  echo "Logs: $LOG_DIR/"
-  echo ""
 
   # Check for pending checkpoints
   local pending_count=$(ls "$CHECKPOINT_DIR/pending/"*.json 2>/dev/null | wc -l | tr -d ' ')
   if [ "$pending_count" -gt 0 ]; then
-    echo "⚠ Pending checkpoints: $pending_count"
-    echo "Review: ls $CHECKPOINT_DIR/pending/"
     echo ""
+    printf "${C_YELLOW}⚠${C_RESET} Pending checkpoints: %d\n" "$pending_count"
+    printf "${C_DIM}  Run: /gsd:checkpoints${C_RESET}\n"
   fi
+
+  echo ""
+  printf "${C_DIM}Logs: %s/${C_RESET}\n" "$LOG_DIR"
+  echo ""
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
